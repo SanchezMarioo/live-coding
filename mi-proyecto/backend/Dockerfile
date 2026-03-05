@@ -1,18 +1,18 @@
-# Usa una imagen ligera de Node
-FROM node:18-alpine
+FROM python:3.12-slim
 
-# Crea el directorio de trabajo
 WORKDIR /app
 
-# Copia los archivos de dependencias y las instala
-COPY package*.json ./
-RUN npm install
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
-# Copia el resto del código
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
 COPY . .
 
-# Expone el puerto que usa tu app
+RUN useradd -m appuser && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 3000
 
-# Comando para arrancar la app
-CMD ["node", "app.js"]
+CMD ["gunicorn", "--bind", "0.0.0.0:3000", "--workers", "1", "app:create_app()"]

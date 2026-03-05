@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>🕹️ RETRO FORUM - Muro Público</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Toastify CSS para notificaciones -->
+    <link rel="stylesheet" type="text/css" href="https://cdn.jsdelivr.net/npm/toastify-js/src/toastify.min.css">
+    <script type="text/javascript" src="https://cdn.jsdelivr.net/npm/toastify-js"></script>
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/otpauth@9.2.2/dist/otpauth.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+    <!-- Fuentes Retro -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&display=swap" rel="stylesheet">
+    <style>
+        * {
+            image-rendering: pixelated;
+        }
+        body {
+            background: linear-gradient(135deg, #2c1e3f 0%, #1a1625 100%);
+            font-family: 'VT323', monospace;
+        }
+        .retro-title {
+            font-family: 'Press Start 2P', cursive;
+            text-shadow: 3px 3px 0px #000, 6px 6px 0px rgba(255,215,0,0.3);
+        }
+        .retro-box {
+            background: linear-gradient(145deg, #f4e4c1 0%, #e8d5a8 100%);
+            border: 5px solid #3d2817;
+            box-shadow: 8px 8px 0px #000, 12px 12px 20px rgba(0,0,0,0.5);
+        }
+        .retro-btn {
+            border: 4px solid #000;
+            box-shadow: 4px 4px 0px #000;
+            font-family: 'Press Start 2P', cursive;
+            transition: all 0.1s;
+        }
+        .retro-btn:hover {
+            transform: translate(2px, 2px);
+            box-shadow: 2px 2px 0px #000;
+        }
+        .retro-btn:active {
+            transform: translate(4px, 4px);
+            box-shadow: 0px 0px 0px #000;
+        }
+        .retro-input {
+            background: #fff9e6;
+            border: 3px solid #3d2817;
+            font-family: 'VT323', monospace;
+            font-size: 20px;
+        }
+        .retro-input:focus {
+            outline: none;
+            box-shadow: 0 0 0 3px #ffd700;
+        }
+        .scanlines {
+            position: relative;
+            overflow-x: hidden;
+            overflow-y: auto;
+        }
+        .scanlines::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(transparent 50%, rgba(0,0,0,0.05) 50%);
+            background-size: 100% 4px;
+            pointer-events: none;
+            z-index: 1;
+        }
+        .pixel-corners {
+            clip-path: polygon(
+                0 8px, 8px 8px, 8px 0,
+                calc(100% - 8px) 0, calc(100% - 8px) 8px, 100% 8px,
+                100% calc(100% - 8px), calc(100% - 8px) calc(100% - 8px), calc(100% - 8px) 100%,
+                8px 100%, 8px calc(100% - 8px), 0 calc(100% - 8px)
+            );
+        }
+        .crt-glow {
+            box-shadow: 0 0 20px rgba(255, 215, 0, 0.3), inset 0 0 50px rgba(255, 215, 0, 0.1);
+        }
+    </style>
+</head>
+<body class="text-gray-900 scanlines">
+    <div class="min-h-screen py-6">
+        <!-- Navbar -->
+        <nav class="retro-box mx-auto max-w-4xl mb-8 p-4 crt-glow">
+            <div class="flex justify-between items-center flex-wrap gap-4">
+                <h1 class="retro-title text-xl md:text-2xl" style="color: #ff6b35; font-size: clamp(12px, 4vw, 18px);">
+                    🕹️ RETRO FORUM
+                </h1>
+                <div class="flex gap-2 flex-wrap">
+                    <button onclick="navigateTo('/')" id="btnHome" class="retro-btn bg-lime-300 hover:bg-lime-200 text-black px-4 py-2 text-xs" style="font-size: 10px;">
+                        INICIO
+                    </button>
+                    <button onclick="openAuthModal('login')" id="btnLogin" class="retro-btn bg-cyan-400 hover:bg-cyan-300 text-black px-4 py-2 text-xs" style="font-size: 10px;">
+                        LOGIN
+                    </button>
+                    <button onclick="openAuthModal('register')" id="btnRegister" class="retro-btn bg-pink-400 hover:bg-pink-300 text-black px-4 py-2 text-xs" style="font-size: 10px;">
+                        REGISTER
+                    </button>
+                    <button onclick="navigateTo('/profile')" id="btnProfile" class="retro-btn bg-amber-300 hover:bg-amber-200 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
+                        PERFIL
+                    </button>
+                    <button onclick="logout()" id="btnLogout" class="retro-btn bg-red-400 hover:bg-red-300 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
+                        LOGOUT
+                    </button>
+                </div>
+            </div>
+        </nav>
+
+        <div class="max-w-4xl mx-auto px-4">
+            <!-- Modal de Autenticación -->
+            <div id="authModal" class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center hidden z-50 p-4">
+                <div class="retro-box p-6 md:p-8 w-full max-w-md crt-glow">
+                    <div class="flex justify-between items-center mb-6">
+                        <h2 class="retro-title text-lg md:text-xl text-purple-800" id="authTitle" style="font-size: clamp(12px, 3vw, 16px);">LOGIN</h2>
+                        <button onclick="closeAuthModal()" class="text-4xl font-bold hover:text-red-600" style="font-family: 'Press Start 2P';">&times;</button>
+                    </div>
+
+                    <!-- Tabs -->
+                    <div class="flex gap-2 mb-6">
+                        <button onclick="switchAuthTab('login')" id="tabLogin" class="retro-btn flex-1 bg-yellow-300 text-black py-2 text-xs" style="font-size: 10px;">
+                            LOGIN
+                        </button>
+                        <button onclick="switchAuthTab('register')" id="tabRegister" class="retro-btn flex-1 bg-gray-300 text-black py-2 text-xs" style="font-size: 10px;">
+                            REGISTER
+                        </button>
+                    </div>
+
+                    <!-- Formulario Login -->
+                    <form id="loginForm" onsubmit="handleLogin(event)" class="space-y-4">
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">USUARIO/EMAIL:</label>
+                            <input type="text" id="loginUsername" class="retro-input w-full p-2" placeholder="usuario@example.com" minlength="3" autocomplete="username" required>
+                        </div>
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">PASSWORD:</label>
+                            <input type="password" id="loginPassword" class="retro-input w-full p-2" placeholder="********" minlength="6" autocomplete="current-password" required>
+                        </div>
+                        <button type="submit" class="retro-btn w-full bg-green-400 hover:bg-green-300 text-black font-bold py-3 text-sm">INICIAR SESION</button>
+
+                        <div class="text-center">
+                            <p class="text-sm font-bold" style="color: #3d2817;">o iniciar sesion con Google</p>
+                        </div>
+
+                        <button
+                            type="button"
+                            onclick="startGoogleOAuth('login')"
+                            class="retro-btn w-full bg-white hover:bg-gray-100 text-black font-bold py-3 text-sm"
+                        >
+                            G INICIAR CON GOOGLE
+                        </button>
+                    </form>
+
+                    <!-- Formulario Registro -->
+                    <form id="registerForm" onsubmit="handleRegister(event)" class="space-y-4 hidden">
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">EMAIL:</label>
+                            <input type="email" id="registerEmail" class="retro-input w-full p-2" placeholder="tu@email.com" autocomplete="email" required>
+                        </div>
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">NOMBRE:</label>
+                            <input type="text" id="registerFirstName" class="retro-input w-full p-2" placeholder="Mario" minlength="2" maxlength="50" autocomplete="given-name" required>
+                        </div>
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">APELLIDOS:</label>
+                            <input type="text" id="registerLastName" class="retro-input w-full p-2" placeholder="Sanper" minlength="2" maxlength="50" autocomplete="family-name" required>
+                        </div>
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">USUARIO:</label>
+                            <input type="text" id="registerUsername" class="retro-input w-full p-2" placeholder="mi_usuario" minlength="3" maxlength="20" pattern="[a-zA-Z0-9_\-]+" title="Solo letras, números, guiones y guiones bajos" autocomplete="username" required>
+                        </div>
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">PASSWORD:</label>
+                            <input type="password" id="registerPassword" class="retro-input w-full p-2" placeholder="********" minlength="6" autocomplete="new-password" required>
+                            <p class="text-sm mt-1" style="color: #666;">Min. 6 chars con letras y nums</p>
+                        </div>
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">CONFIRMAR:</label>
+                            <input type="password" id="registerPasswordConfirm" class="retro-input w-full p-2" placeholder="********" minlength="6" autocomplete="new-password" required>
+                        </div>
+                        <button type="submit" class="retro-btn w-full bg-pink-400 hover:bg-pink-300 text-black font-bold py-3 text-sm">REGISTRARSE</button>
+
+                        <div class="text-center">
+                            <p class="text-sm font-bold" style="color: #3d2817;">o registrarte con Google</p>
+                        </div>
+
+                        <button
+                            type="button"
+                            onclick="startGoogleOAuth('register')"
+                            class="retro-btn w-full bg-white hover:bg-gray-100 text-black font-bold py-3 text-sm"
+                        >
+                            G REGISTRAR CON GOOGLE
+                        </button>
+                    </form>
+
+                    <!-- Mensaje de error -->
+                    <div id="authError" class="mt-4 p-3 bg-red-300 border-4 border-red-600 text-red-900 font-bold text-lg hidden"></div>
+                </div>
+            </div>
+
+        <!-- Modal de Edición de Mensaje -->
+        <div id="editModal" class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center hidden z-50 p-4">
+            <div class="retro-box p-6 md:p-8 w-full max-w-md crt-glow">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="retro-title text-lg md:text-xl text-orange-600" style="font-size: clamp(12px, 3vw, 16px);">EDIT MSG</h2>
+                    <button onclick="closeEditModal()" class="text-4xl font-bold hover:text-red-600" style="font-family: 'Press Start 2P';">&times;</button>
+                </div>
+                <form onsubmit="saveEditedMessage(event)" class="space-y-4">
+                    <div>
+                        <textarea id="editMessageInput" class="retro-input w-full p-3 resize-none" rows="5" minlength="3" maxlength="500" required></textarea>
+                        <p class="text-lg mt-1" style="color: #3d2817;"><span id="editCharCount">0</span>/500 chars (min 3)</p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button type="submit" class="retro-btn flex-1 bg-yellow-400 hover:bg-yellow-300 text-black font-bold py-3 text-xs" style="font-size: 10px;">SAVE</button>
+                        <button type="button" onclick="closeEditModal()" class="retro-btn flex-1 bg-gray-400 hover:bg-gray-300 text-black font-bold py-3 text-xs" style="font-size: 10px;">CANCEL</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Modal de Doble Factor (2FA) -->
+        <div id="twoFactorModal" class="fixed inset-0 bg-black bg-opacity-80 flex items-center justify-center hidden z-50 p-4">
+            <div class="retro-box p-6 md:p-8 w-full max-w-md crt-glow">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="retro-title text-lg md:text-xl text-indigo-700" style="font-size: clamp(12px, 3vw, 16px);">2FA CHECK</h2>
+                    <button onclick="closeTwoFactorModal()" class="text-4xl font-bold hover:text-red-600" style="font-family: 'Press Start 2P';">&times;</button>
+                </div>
+
+                <p class="text-lg mb-3" style="color: #3d2817;">
+                    Verifica con tu app autenticadora (Google Authenticator/Authy).
+                </p>
+                <p id="twoFactorInfo" class="text-sm mb-4" style="color: #5f0f40;">Configurando 2FA...</p>
+
+                <div id="twoFactorSetupPanel" class="mb-4 hidden">
+                    <p class="text-sm mb-2" style="color: #3d2817;">Escanea este QR en tu app autenticadora:</p>
+                    <div class="flex justify-center mb-3">
+                        <canvas id="twoFactorQrCanvas" class="bg-white p-2 border-2 border-black"></canvas>
+                    </div>
+                    <p class="text-xs mb-1" style="color: #3d2817;">Clave manual:</p>
+                    <p id="twoFactorSecretText" class="text-xs break-all p-2 bg-white border-2 border-black" style="color: #5f0f40;">-</p>
+                </div>
+
+                <form onsubmit="verifyTwoFactorCode(event)" class="space-y-4">
+                    <div>
+                        <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">CODIGO 2FA:</label>
+                        <input
+                            type="text"
+                            id="twoFactorCodeInput"
+                            class="retro-input w-full p-2 text-center tracking-widest"
+                            placeholder="123456"
+                            inputmode="numeric"
+                            pattern="[0-9]{6}"
+                            maxlength="6"
+                            minlength="6"
+                            required
+                        >
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="twoFactorSubmitBtn" type="submit" class="retro-btn flex-1 bg-indigo-400 hover:bg-indigo-300 text-black font-bold py-3 text-xs" style="font-size: 10px;">VERIFICAR</button>
+                        <button id="twoFactorSecondaryBtn" type="button" onclick="handleTwoFactorSecondaryAction()" class="retro-btn flex-1 bg-gray-300 hover:bg-gray-200 text-black font-bold py-3 text-xs" style="font-size: 10px;">CANCELAR</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+            <!-- Sección: Publicar Mensaje (solo si está logueado) -->
+            <section id="profileSection" class="hidden mb-8">
+                <div class="retro-box p-0 crt-glow overflow-hidden">
+                    <div id="profileCover" class="h-28 md:h-40 w-full border-b-4 border-black" style="background: repeating-linear-gradient(45deg, #ff6b35 0px, #ff6b35 18px, #ffd166 18px, #ffd166 36px);"></div>
+
+                    <div class="px-4 md:px-6 pb-6" style="margin-top: -42px;">
+                        <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-5">
+                            <div class="flex items-end gap-3">
+                                <img id="profileAvatar" src="" alt="Avatar" class="w-24 h-24 md:w-32 md:h-32 object-cover border-4 border-black bg-white">
+                                <div class="pb-1">
+                                    <p id="profileHeroName" class="text-2xl md:text-3xl font-bold" style="color: #3d2817; font-family: 'VT323', monospace;">Usuario</p>
+                                    <p id="profileHeroHandle" class="text-sm md:text-base" style="color: #5f0f40; font-family: 'Press Start 2P', cursive;">@usuario</p>
+                                    <p id="profileLevelInfo" class="text-sm md:text-base font-bold" style="color: #5f0f40;">Nivel: Nuevo</p>
+                                </div>
+                            </div>
+                            <div class="flex gap-2 flex-wrap">
+                                <button id="profileEditBtn" type="button" onclick="startEditProfile()" class="retro-btn bg-yellow-300 hover:bg-yellow-200 text-black px-4 py-2 text-xs" style="font-size: 10px;">
+                                    EDIT PROFILE
+                                </button>
+                                <button id="profileSaveBtn" form="profileForm" type="submit" class="retro-btn bg-green-400 hover:bg-green-300 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
+                                    SAVE PROFILE
+                                </button>
+                                <button id="profileCancelBtn" type="button" onclick="cancelEditProfile()" class="retro-btn bg-gray-300 hover:bg-gray-200 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
+                                    CANCEL
+                                </button>
+                                <button id="profileFriendBtn" type="button" onclick="toggleFriendshipProfile()" class="retro-btn bg-cyan-300 hover:bg-cyan-200 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
+                                    AGREGAR AMIGO
+                                </button>
+                                <button id="profileFollowBtn" type="button" onclick="toggleFollowProfile()" class="retro-btn bg-fuchsia-300 hover:bg-fuchsia-200 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
+                                    SEGUIR
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-3 gap-2 mb-4">
+                            <div class="retro-box p-2 text-center">
+                                <p class="text-xs" style="color: #5f0f40; font-family: 'Press Start 2P', cursive;">AMIGOS</p>
+                                <p id="profileFriendsCount" class="text-2xl font-bold" style="color: #3d2817;">0</p>
+                            </div>
+                            <div class="retro-box p-2 text-center">
+                                <p class="text-xs" style="color: #5f0f40; font-family: 'Press Start 2P', cursive;">SEGUIDORES</p>
+                                <p id="profileFollowersCount" class="text-2xl font-bold" style="color: #3d2817;">0</p>
+                            </div>
+                            <div class="retro-box p-2 text-center">
+                                <p class="text-xs" style="color: #5f0f40; font-family: 'Press Start 2P', cursive;">SIGUIENDO</p>
+                                <p id="profileFollowingCount" class="text-2xl font-bold" style="color: #3d2817;">0</p>
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <aside class="md:col-span-1 space-y-3">
+                                <form id="profileForm" onsubmit="handleProfileSave(event)" class="retro-box p-4 space-y-3">
+                                    <p class="retro-title text-xs text-cyan-700" style="font-size: 10px;">ABOUT</p>
+                                    <div>
+                                        <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">NOMBRE:</label>
+                                        <input type="text" id="profileFirstName" class="retro-input w-full p-2" minlength="2" maxlength="50" required disabled>
+                                    </div>
+                                    <div>
+                                        <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">APELLIDOS:</label>
+                                        <input type="text" id="profileLastName" class="retro-input w-full p-2" minlength="2" maxlength="50" required disabled>
+                                    </div>
+                                    <div>
+                                        <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">USUARIO:</label>
+                                        <input type="text" id="profileUsername" class="retro-input w-full p-2" disabled>
+                                    </div>
+                                    <div>
+                                        <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">EMAIL:</label>
+                                        <input type="text" id="profileEmail" class="retro-input w-full p-2" disabled>
+                                    </div>
+                                    <div>
+                                        <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">FOTO:</label>
+                                        <input id="profileAvatarInput" type="file" accept="image/png,image/jpeg,image/webp" class="retro-input w-full p-2 text-sm" disabled>
+                                        <p class="text-sm mt-1" style="color: #666;">PNG/JPG/WEBP. Max 2MB.</p>
+                                    </div>
+                                    <div>
+                                        <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">PORTADA:</label>
+                                        <input id="profileCoverInput" type="file" accept="image/png,image/jpeg,image/webp" class="retro-input w-full p-2 text-sm" disabled>
+                                        <p class="text-sm mt-1" style="color: #666;">Imagen de cabecera del perfil.</p>
+                                    </div>
+                                </form>
+                            </aside>
+
+                            <div class="md:col-span-2">
+                                <div class="retro-box p-4">
+                                    <h3 class="retro-title text-sm md:text-base mb-3 text-purple-700" style="font-size: clamp(10px, 2.5vw, 14px);">PUBLICACIONES</h3>
+                                    <div id="profilePostsList" class="space-y-3"></div>
+                                    <p id="profilePostsEmpty" class="text-lg" style="color: #666;">Aun no hay publicaciones en este perfil.</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section id="publishSection" class="hidden mb-8">
+                <div class="retro-box p-6 crt-glow">
+                    <h2 class="retro-title text-lg md:text-xl mb-4 text-green-600" style="font-size: clamp(12px, 3vw, 16px);">NEW MESSAGE</h2>
+                    <p class="text-xl mb-4" style="color: #3d2817;">Hola, <span id="welcomeUsername" class=" capitalize font-bold text-purple-700">USER</span>! 👋</p>
+
+                    <div id="replyContext" class="hidden mb-4 p-3 bg-white border-4 border-black">
+                        <p class="text-sm font-bold" style="color: #5f0f40;">RESPONDIENDO</p>
+                        <p id="replyContextText" class="text-lg" style="color: #3d2817;">A @usuario</p>
+                        <button type="button" onclick="cancelReply()" class="retro-btn mt-2 bg-gray-300 hover:bg-gray-200 text-black px-3 py-1 text-xs" style="font-size: 10px;">CANCELAR RESPUESTA</button>
+                    </div>
+
+                    <form onsubmit="handlePublishMessage(event)" class="space-y-4">
+                        <div>
+                            <label class="block font-bold mb-2 text-lg" style="color: #3d2817;">CATEGORIA:</label>
+                            <select id="messageCategory" class="retro-input w-full p-2" required>
+                                <option value="general">General</option>
+                                <option value="anuncios">Anuncios</option>
+                                <option value="preguntas">Preguntas</option>
+                                <option value="ideas">Ideas</option>
+                                <option value="offtopic">Offtopic</option>
+                            </select>
+                        </div>
+                        <div>
+                            <textarea id="messageInput" class="retro-input w-full p-3 resize-none" rows="4" placeholder="Que quieres compartir?..." minlength="3" maxlength="500" required></textarea>
+                            <p class="text-lg mt-1" style="color: #3d2817;"><span id="charCount">0</span>/500 chars (min 3)</p>
+                        </div>
+                        <button type="submit" class="retro-btn w-full bg-lime-400 hover:bg-lime-300 text-black font-bold py-3 text-sm">PUBLICAR</button>
+                    </form>
+                </div>
+            </section>
+
+            <!-- Sección: Listado de Mensajes -->
+            <section id="wallSection" class="mb-8">
+                <div class="retro-box p-4 mb-4">
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+                        <div>
+                            <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">FILTRAR CATEGORIA:</label>
+                            <select id="filterCategory" class="retro-input w-full p-2">
+                                <option value="all">Todas</option>
+                                <option value="general">General</option>
+                                <option value="anuncios">Anuncios</option>
+                                <option value="preguntas">Preguntas</option>
+                                <option value="ideas">Ideas</option>
+                                <option value="offtopic">Offtopic</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">MOSTRAR:</label>
+                            <select id="messageLimit" class="retro-input w-full p-2">
+                                <option value="0">Todos</option>
+                                <option value="5">Ultimos 5</option>
+                                <option value="10">Ultimos 10</option>
+                                <option value="20">Ultimos 20</option>
+                            </select>
+                        </div>
+                        <div class="flex items-end">
+                            <p id="messagesInfo" class="text-lg font-bold" style="color: #3d2817;">Mostrando mensajes...</p>
+                        </div>
+                    </div>
+                </div>
+                <div id="messagesList" class="space-y-4">
+                    <!-- Los mensajes se cargarán dinámicamente aquí -->
+                </div>
+                <div id="emptyMessages" class="retro-box p-8 text-center crt-glow">
+                    <p class="text-2xl font-bold mb-2" style="color: #3d2817;">NO HAY MENSAJES!</p>
+                    <p class="text-xl" style="color: #666;">Inicia sesion y se el primero!</p>
+                </div>
+            </section>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
