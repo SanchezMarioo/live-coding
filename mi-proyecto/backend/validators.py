@@ -1,4 +1,7 @@
 import re
+import base64
+import binascii
+from urllib.parse import urlparse, unquote
 from typing import Any
 
 ALLOWED_CATEGORIES = {"general", "anuncios", "preguntas", "ideas", "offtopic"}
@@ -9,6 +12,23 @@ _HAS_LETTER_RE = re.compile(r"[A-Za-z]")
 _HAS_DIGIT_RE = re.compile(r"\d")
 _CONTROL_CHAR_RE = re.compile(r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]")
 _PERSON_NAME_RE = re.compile(r"^[A-Za-zÀ-ÿ' -]{1,50}$")
+_DATA_IMAGE_RE = re.compile(r"^data:(image\/(png|jpeg|webp));base64,([A-Za-z0-9+/=]+)$", re.IGNORECASE)
+_DANGEROUS_URL_EXT_RE = re.compile(
+    r"\.(php\d?|phtml|phar|cgi|pl|asp|aspx|jsp|js|html?|svg)$",
+    re.IGNORECASE,
+)
+_DANGEROUS_URL_TOKEN_RE = re.compile(
+    r"\.(php\d?|phtml|phar|cgi|pl|asp|aspx|jsp|js|html?|svg)(?:$|[/?#&=])",
+    re.IGNORECASE,
+)
+_ALLOWED_URL_IMAGE_EXT_RE = re.compile(r"\.(png|jpe?g|webp|gif)$", re.IGNORECASE)
+_MAX_PROFILE_MEDIA_BYTES = 3 * 1024 * 1024
+_EMBEDDED_SCRIPT_PATTERNS = (
+    b"<?php",
+    b"<script",
+    b"<%",
+    b"#!/usr/bin/php",
+)
 
 
 class ValidationError(ValueError):
@@ -96,8 +116,7 @@ def validate_login_identifier(identifier: Any) -> str:
 
 def validate_google_credential(credential: Any) -> str:
     value = sanitize_text(credential, 4096)
-    # Basic JWT-like shape check before calling Google verification.
-    if value.count(".") != 2:
+    if len(value) < 20 or " " in value:
         raise ValidationError("Invalid Google token")
     return value
 
@@ -113,6 +132,13 @@ def validate_google_subject(subject: Any) -> str:
     value = sanitize_text(subject, 255)
     if len(value) < 6:
         raise ValidationError("Invalid Google account subject")
+    return value
+
+
+def validate_totp_code(code: Any) -> str:
+    value = sanitize_text(code, 16)
+    if not re.fullmatch(r"\d{6}", value):
+        raise ValidationError("Invalid two-factor code")
     return value
 
 
@@ -142,9 +168,52 @@ def validate_profile_media_url(value: Any, field_label: str) -> str:
 
     lower = text.lower()
     if lower.startswith("http://") or lower.startswith("https://"):
+        parsed = urlparse(text)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValidationError(f"{field_label} must be a valid image URL")
+
+        path = unquote(parsed.path or "")
+        query = unquote(parsed.query or "")
+        fragment = unquote(parsed.fragment or "")
+
+        if (
+            _DANGEROUS_URL_EXT_RE.search(path)
+            or _DANGEROUS_URL_TOKEN_RE.search(query)
+            or _DANGEROUS_URL_TOKEN_RE.search(fragment)
+        ):
+            raise ValidationError(f"{field_label} has an unsupported file extension")
+
+        # If URL includes an extension, it must look like an image extension.
+        if "." in path.rsplit("/", 1)[-1] and not _ALLOWED_URL_IMAGE_EXT_RE.search(path):
+            raise ValidationError(f"{field_label} must point to a valid image extension")
+
         return text
 
-    if lower.startswith("data:image/") and ";base64," in lower:
+    match = _DATA_IMAGE_RE.match(text)
+    if match:
+        mime = match.group(1).lower()
+        payload = match.group(3)
+
+        try:
+            raw = base64.b64decode(payload, validate=True)
+        except (binascii.Error, ValueError) as exc:
+            raise ValidationError(f"{field_label} contains invalid base64 data") from exc
+
+        if len(raw) == 0 or len(raw) > _MAX_PROFILE_MEDIA_BYTES:
+            raise ValidationError(f"{field_label} exceeds max size of 3MB")
+
+        raw_lower = raw.lower()
+        if any(pattern in raw_lower for pattern in _EMBEDDED_SCRIPT_PATTERNS):
+            raise ValidationError(f"{field_label} contains embedded script content")
+
+        # Validate magic bytes so non-image payloads cannot masquerade as images.
+        if mime == "image/png" and not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValidationError(f"{field_label} is not a valid PNG image")
+        if mime == "image/jpeg" and not raw.startswith(b"\xff\xd8\xff"):
+            raise ValidationError(f"{field_label} is not a valid JPEG image")
+        if mime == "image/webp" and not (raw.startswith(b"RIFF") and raw[8:12] == b"WEBP"):
+            raise ValidationError(f"{field_label} is not a valid WEBP image")
+
         return text
 
     raise ValidationError(f"{field_label} must be a valid image URL or data URL")

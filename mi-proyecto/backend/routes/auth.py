@@ -1,8 +1,19 @@
 import sqlite3
 import secrets
 import time
+import json
+import hashlib
+import base64
+import hmac
+import struct
+import io
+from urllib.parse import quote
+
+import qrcode
 from collections import defaultdict, deque
 from threading import Lock
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from flask import Blueprint, jsonify, request, session
 from google.auth.transport import requests as google_requests
@@ -26,6 +37,7 @@ from validators import (
     validate_login_identifier,
     validate_password,
     validate_person_name,
+    validate_totp_code,
     validate_username,
 )
 
@@ -34,6 +46,79 @@ bp = Blueprint("auth", __name__, url_prefix="/api/auth")
 _auth_failures = defaultdict(deque)
 _auth_lockouts = {}
 _auth_state_lock = Lock()
+_PENDING_2FA_TTL_SECONDS = 300
+_TOTP_PERIOD_SECONDS = 30
+_TOTP_DIGITS = 6
+
+
+def _ensure_csrf_token() -> str:
+    token = str(session.get("csrf_token", ""))
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session["csrf_token"] = token
+    return token
+
+
+def _rotate_csrf_token() -> str:
+    token = secrets.token_urlsafe(32)
+    session["csrf_token"] = token
+    return token
+
+
+def _user_agent_fingerprint() -> str:
+    user_agent = request.headers.get("User-Agent", "")[:512]
+    return hashlib.sha256(user_agent.encode("utf-8", "ignore")).hexdigest()
+
+
+def _set_authenticated_session(user_id: int) -> str:
+    session.clear()
+    session["user_id"] = int(user_id)
+    csrf_token = _rotate_csrf_token()
+    session["ua_fingerprint"] = _user_agent_fingerprint()
+    session.permanent = True
+    return csrf_token
+
+
+def _generate_totp_secret() -> str:
+    return base64.b32encode(secrets.token_bytes(20)).decode("ascii").rstrip("=")
+
+
+def _normalize_base32_secret(secret: str) -> bytes:
+    sanitized = "".join(ch for ch in secret.upper() if ch.isalnum())
+    padded = sanitized + ("=" * ((8 - len(sanitized) % 8) % 8))
+    return base64.b32decode(padded, casefold=True)
+
+
+def _totp_code(secret: str, for_timestamp: int) -> str:
+    key = _normalize_base32_secret(secret)
+    counter = int(for_timestamp // _TOTP_PERIOD_SECONDS)
+    message = struct.pack(">Q", counter)
+    digest = hmac.new(key, message, hashlib.sha1).digest()
+    offset = digest[-1] & 0x0F
+    binary = struct.unpack(">I", digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    code_int = binary % (10 ** _TOTP_DIGITS)
+    return str(code_int).zfill(_TOTP_DIGITS)
+
+
+def _verify_totp(secret: str, code: str, *, skew_steps: int = 1) -> bool:
+    now = int(time.time())
+    for step in range(-skew_steps, skew_steps + 1):
+        expected = _totp_code(secret, now + (step * _TOTP_PERIOD_SECONDS))
+        if hmac.compare_digest(expected, code):
+            return True
+    return False
+
+
+def _totp_qr_data_url(otpauth_url: str) -> str:
+    qr = qrcode.QRCode(version=None, error_correction=qrcode.constants.ERROR_CORRECT_M, box_size=6, border=2)
+    qr.add_data(otpauth_url)
+    qr.make(fit=True)
+    image = qr.make_image(fill_color="black", back_color="white")
+
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{encoded}"
 
 
 def _client_ip() -> str:
@@ -76,6 +161,7 @@ def _clear_failures(auth_key: str) -> None:
 def _public_user(row):
     contributions = int(row["contributions"]) if "contributions" in row.keys() else 0
     level = level_from_contributions(contributions)
+    two_factor_enabled = bool(row["two_factor_enabled"]) if "two_factor_enabled" in row.keys() else False
     return {
         "id": row["id"],
         "username": row["username"],
@@ -86,6 +172,7 @@ def _public_user(row):
         "coverUrl": row["cover_url"],
         "displayName": build_display_name(row["first_name"], row["last_name"], row["username"]),
         "authProvider": row["auth_provider"],
+        "twoFactorEnabled": two_factor_enabled,
         "contributions": contributions,
         "level": level,
         "createdAt": row["created_at"],
@@ -105,6 +192,7 @@ def _fetch_user_with_stats(db, user_id: int):
             u.avatar_url,
             u.cover_url,
             u.auth_provider,
+            u.two_factor_enabled,
             u.created_at,
             u.last_login_at,
             COALESCE(stats.msg_count, 0) AS contributions
@@ -115,6 +203,18 @@ def _fetch_user_with_stats(db, user_id: int):
             GROUP BY user_id
         ) stats ON stats.user_id = u.id
         WHERE u.id = ?
+        LIMIT 1
+        """,
+        (user_id,),
+    ).fetchone()
+
+
+def _fetch_user_for_auth(db, user_id: int):
+    return db.execute(
+        """
+        SELECT id, username, email, auth_provider, two_factor_secret, two_factor_enabled
+        FROM users
+        WHERE id = ?
         LIMIT 1
         """,
         (user_id,),
@@ -141,6 +241,43 @@ def _build_unique_username(db, base_value: str) -> str:
         trimmed = base[: max(3, 20 - len(suffix))]
         candidate = f"{trimmed}{suffix}"
         counter += 1
+
+
+def _fetch_google_userinfo(access_token: str) -> dict:
+    req = Request(
+        "https://www.googleapis.com/oauth2/v3/userinfo",
+        headers={"Authorization": f"Bearer {access_token}"},
+        method="GET",
+    )
+    try:
+        with urlopen(req, timeout=5) as response:
+            payload = response.read().decode("utf-8")
+    except (HTTPError, URLError, TimeoutError, ValueError) as exc:
+        raise ValidationError("Invalid Google token") from exc
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValidationError("Invalid Google token") from exc
+
+    if not isinstance(data, dict):
+        raise ValidationError("Invalid Google token")
+
+    return data
+
+
+def _resolve_google_identity(credential: str, google_client_id: str) -> dict:
+    if credential.count(".") == 2:
+        try:
+            return id_token.verify_oauth2_token(
+                credential,
+                google_requests.Request(),
+                google_client_id,
+            )
+        except Exception as exc:
+            raise ValidationError("Invalid Google token") from exc
+
+    return _fetch_google_userinfo(credential)
 
 
 @bp.post("/register")
@@ -182,12 +319,10 @@ def register():
 
     row = db.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()
 
-    session.clear()
-    session["user_id"] = row["id"]
-    session.permanent = True
+    csrf_token = _set_authenticated_session(int(row["id"]))
 
     user = _fetch_user_with_stats(db, row["id"])
-    return jsonify({"user": _public_user(user)}), 201
+    return jsonify({"user": _public_user(user), "csrfToken": csrf_token}), 201
 
 
 @bp.post("/login")
@@ -211,7 +346,7 @@ def login():
     db = get_db()
     row = db.execute(
         """
-        SELECT id, username, email, first_name, last_name, password_hash, auth_provider, created_at, last_login_at
+        SELECT id, username, email, first_name, last_name, password_hash, auth_provider, two_factor_enabled, created_at, last_login_at
         FROM users
         WHERE lower(username) = ? OR lower(email) = ?
         LIMIT 1
@@ -245,11 +380,16 @@ def login():
 
     refreshed = _fetch_user_with_stats(db, row["id"])
 
-    session.clear()
-    session["user_id"] = row["id"]
-    session.permanent = True
+    if bool(row["two_factor_enabled"]) and row["auth_provider"] == "local":
+        session.clear()
+        session["pending_2fa_user_id"] = int(row["id"])
+        session["pending_2fa_until"] = int(time.time()) + _PENDING_2FA_TTL_SECONDS
+        session["pending_2fa_ua"] = _user_agent_fingerprint()
+        return jsonify({"twoFactorRequired": True}), 202
 
-    return jsonify({"user": _public_user(refreshed)})
+    csrf_token = _set_authenticated_session(int(row["id"]))
+
+    return jsonify({"user": _public_user(refreshed), "csrfToken": csrf_token})
 
 
 @bp.post("/google")
@@ -280,14 +420,10 @@ def google_auth():
         )
 
     try:
-        token_info = id_token.verify_oauth2_token(
-            credential,
-            google_requests.Request(),
-            google_client_id,
-        )
-    except Exception as exc:
+        token_info = _resolve_google_identity(credential, google_client_id)
+    except ValidationError as exc:
         _record_failure(auth_key, 300)
-        raise ValidationError("Invalid Google token") from exc
+        raise exc
 
     if not token_info.get("email_verified"):
         _record_failure(auth_key, 300)
@@ -348,18 +484,145 @@ def google_auth():
 
     user = _fetch_user_with_stats(db, int(user_id))
 
-    session.clear()
-    session["user_id"] = user_id
-    session.permanent = True
+    csrf_token = _set_authenticated_session(int(user_id))
     _clear_failures(auth_key)
 
-    return jsonify({"user": _public_user(user)})
+    return jsonify({"user": _public_user(user), "csrfToken": csrf_token})
 
 
 @bp.post("/logout")
 def logout():
     session.clear()
     return jsonify({"message": "Logged out"})
+
+
+@bp.post("/2fa/setup")
+def setup_two_factor():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": {"code": "unauthorized", "message": "Authentication required"}}), 401
+
+    db = get_db()
+    row = _fetch_user_for_auth(db, int(user_id))
+    if row is None:
+        session.clear()
+        return jsonify({"error": {"code": "unauthorized", "message": "Authentication required"}}), 401
+
+    if row["auth_provider"] != "local":
+        return jsonify({"error": {"code": "forbidden", "message": "Two-factor setup is only available for local accounts"}}), 403
+
+    secret = row["two_factor_secret"] or _generate_totp_secret()
+    if not row["two_factor_secret"]:
+        db.execute("UPDATE users SET two_factor_secret = ? WHERE id = ?", (secret, int(user_id)))
+        db.commit()
+
+    issuer = "Retro Forum"
+    label = quote(f"{issuer}:{row['username']}")
+    params = f"secret={secret}&issuer={quote(issuer)}&algorithm=SHA1&digits=6&period=30"
+    otpauth_url = f"otpauth://totp/{label}?{params}"
+    qr_data_url = _totp_qr_data_url(otpauth_url)
+
+    return jsonify(
+        {
+            "twoFactor": {
+                "enabled": bool(row["two_factor_enabled"]),
+                "secret": secret,
+                "otpauthUrl": otpauth_url,
+                "qrDataUrl": qr_data_url,
+            }
+        }
+    )
+
+
+@bp.post("/2fa/enable")
+def enable_two_factor():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": {"code": "unauthorized", "message": "Authentication required"}}), 401
+
+    require_json_content_type(request.content_type)
+    payload = require_json_object(request.get_json(silent=True) or {})
+    enforce_allowed_fields(payload, {"code"}, {"code"})
+    code = validate_totp_code(payload.get("code"))
+
+    db = get_db()
+    row = _fetch_user_for_auth(db, int(user_id))
+    if row is None:
+        session.clear()
+        return jsonify({"error": {"code": "unauthorized", "message": "Authentication required"}}), 401
+    if row["auth_provider"] != "local":
+        return jsonify({"error": {"code": "forbidden", "message": "Two-factor setup is only available for local accounts"}}), 403
+
+    secret = row["two_factor_secret"] or _generate_totp_secret()
+    if not _verify_totp(secret, code):
+        return jsonify({"error": {"code": "invalid_2fa_code", "message": "Invalid two-factor code"}}), 401
+
+    db.execute("UPDATE users SET two_factor_secret = ?, two_factor_enabled = 1 WHERE id = ?", (secret, int(user_id)))
+    db.commit()
+
+    return jsonify({"twoFactor": {"enabled": True}})
+
+
+@bp.post("/2fa/disable")
+def disable_two_factor():
+    user_id = session.get("user_id")
+    if not user_id:
+        return jsonify({"error": {"code": "unauthorized", "message": "Authentication required"}}), 401
+
+    require_json_content_type(request.content_type)
+    payload = require_json_object(request.get_json(silent=True) or {})
+    enforce_allowed_fields(payload, {"code"}, {"code"})
+    code = validate_totp_code(payload.get("code"))
+
+    db = get_db()
+    row = _fetch_user_for_auth(db, int(user_id))
+    if row is None:
+        session.clear()
+        return jsonify({"error": {"code": "unauthorized", "message": "Authentication required"}}), 401
+
+    secret = row["two_factor_secret"]
+    if not row["two_factor_enabled"] or not secret:
+        return jsonify({"twoFactor": {"enabled": False}})
+
+    if not _verify_totp(secret, code):
+        return jsonify({"error": {"code": "invalid_2fa_code", "message": "Invalid two-factor code"}}), 401
+
+    db.execute("UPDATE users SET two_factor_enabled = 0, two_factor_secret = NULL WHERE id = ?", (int(user_id),))
+    db.commit()
+
+    return jsonify({"twoFactor": {"enabled": False}})
+
+
+@bp.post("/2fa/verify-login")
+def verify_two_factor_login():
+    require_json_content_type(request.content_type)
+    payload = require_json_object(request.get_json(silent=True) or {})
+    enforce_allowed_fields(payload, {"code"}, {"code"})
+    code = validate_totp_code(payload.get("code"))
+
+    pending_user_id = session.get("pending_2fa_user_id")
+    pending_until = int(session.get("pending_2fa_until", 0))
+    pending_ua = str(session.get("pending_2fa_ua", ""))
+    if not pending_user_id or int(time.time()) > pending_until:
+        session.clear()
+        return jsonify({"error": {"code": "unauthorized", "message": "2FA login challenge expired"}}), 401
+
+    if pending_ua and not hmac.compare_digest(pending_ua, _user_agent_fingerprint()):
+        session.clear()
+        return jsonify({"error": {"code": "unauthorized", "message": "2FA login challenge invalid"}}), 401
+
+    db = get_db()
+    row = _fetch_user_for_auth(db, int(pending_user_id))
+    if row is None or not row["two_factor_enabled"] or not row["two_factor_secret"]:
+        session.clear()
+        return jsonify({"error": {"code": "unauthorized", "message": "2FA login challenge invalid"}}), 401
+
+    if not _verify_totp(str(row["two_factor_secret"]), code):
+        return jsonify({"error": {"code": "invalid_2fa_code", "message": "Invalid two-factor code"}}), 401
+
+    csrf_token = _set_authenticated_session(int(pending_user_id))
+    user = _fetch_user_with_stats(db, int(pending_user_id))
+    return jsonify({"user": _public_user(user), "csrfToken": csrf_token})
 
 
 @bp.get("/me")
@@ -375,4 +638,7 @@ def me():
         session.clear()
         return jsonify({"error": {"code": "unauthorized", "message": "Authentication required"}}), 401
 
-    return jsonify({"user": _public_user(row)})
+    csrf_token = _ensure_csrf_token()
+    if not session.get("ua_fingerprint"):
+        session["ua_fingerprint"] = _user_agent_fingerprint()
+    return jsonify({"user": _public_user(row), "csrfToken": csrf_token})

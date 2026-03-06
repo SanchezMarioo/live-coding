@@ -3,9 +3,11 @@ from collections import defaultdict, deque
 from threading import Lock
 import time
 import secrets
+import hmac
+import hashlib
 from urllib.parse import urlparse
 
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, session
 from flask_cors import CORS
 from werkzeug.exceptions import HTTPException
 
@@ -31,6 +33,11 @@ def _check_rate_limit(key: str, window_seconds: int, max_attempts: int) -> bool:
         return True
 
 
+def _user_agent_fingerprint() -> str:
+    user_agent = request.headers.get("User-Agent", "")[:512]
+    return hashlib.sha256(user_agent.encode("utf-8", "ignore")).hexdigest()
+
+
 def create_app() -> Flask:
     app = Flask(__name__)
     app.config.from_object(Config)
@@ -43,7 +50,6 @@ def create_app() -> Flask:
         app.logger.warning("Weak SECRET_KEY detected; using ephemeral runtime key.")
 
     app.config["SESSION_COOKIE_HTTPONLY"] = True
-    app.config["SESSION_COOKIE_SAMESITE"] = "Strict"
     app.config["SESSION_REFRESH_EACH_REQUEST"] = False
 
     CORS(
@@ -51,7 +57,7 @@ def create_app() -> Flask:
         supports_credentials=True,
         origins=app.config["CORS_ORIGINS"],
         methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization"],
+        allow_headers=["Content-Type", "Authorization", "X-CSRF-Token"],
     )
 
     db.init_app(app)
@@ -67,6 +73,20 @@ def create_app() -> Flask:
     def enforce_rate_limits():
         if not request.path.startswith("/api/"):
             return None
+
+        request_host = request.host.split(":", 1)[0].strip().lower()
+        trusted_hosts = set(app.config.get("TRUSTED_HOSTS", set()))
+        if trusted_hosts and request_host not in trusted_hosts:
+            return jsonify({"error": {"code": "bad_host", "message": "Host not allowed"}}), 400
+
+        if session.get("user_id"):
+            current_fingerprint = _user_agent_fingerprint()
+            stored_fingerprint = str(session.get("ua_fingerprint", ""))
+            if stored_fingerprint and not hmac.compare_digest(stored_fingerprint, current_fingerprint):
+                session.clear()
+                return jsonify({"error": {"code": "unauthorized", "message": "Session invalidated"}}), 401
+            if not stored_fingerprint:
+                session["ua_fingerprint"] = current_fingerprint
 
         client_ip = (request.remote_addr or "unknown").strip()
         method = request.method.upper()
@@ -92,6 +112,13 @@ def create_app() -> Flask:
                     return jsonify({"error": {"code": "csrf_blocked", "message": "Referer not allowed"}}), 403
             else:
                 return jsonify({"error": {"code": "csrf_blocked", "message": "Missing origin headers"}}), 403
+
+            csrf_exempt_paths = {"/api/auth/login", "/api/auth/register", "/api/auth/google"}
+            if path not in csrf_exempt_paths and session.get("user_id"):
+                session_csrf = str(session.get("csrf_token", ""))
+                request_csrf = str(request.headers.get("X-CSRF-Token", ""))
+                if not session_csrf or not request_csrf or not hmac.compare_digest(session_csrf, request_csrf):
+                    return jsonify({"error": {"code": "csrf_blocked", "message": "Invalid CSRF token"}}), 403
 
         auth_paths = {"/api/auth/login", "/api/auth/register", "/api/auth/google"}
         write_paths = {"/api/messages"}

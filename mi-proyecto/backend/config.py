@@ -29,6 +29,12 @@ class Config:
         if origin.strip()
     ]
 
+    TRUSTED_HOSTS = {
+        host.strip().lower()
+        for host in os.getenv("TRUSTED_HOSTS", "localhost,127.0.0.1,api").split(",")
+        if host.strip()
+    }
+
     AUTH_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("AUTH_RATE_LIMIT_WINDOW_SECONDS", "60"))
     AUTH_RATE_LIMIT_MAX_ATTEMPTS = int(os.getenv("AUTH_RATE_LIMIT_MAX_ATTEMPTS", "10"))
     WRITE_RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("WRITE_RATE_LIMIT_WINDOW_SECONDS", "30"))

@@ -279,7 +279,7 @@
                     <div class="px-4 md:px-6 pb-6" style="margin-top: -42px;">
                         <div class="flex flex-col md:flex-row md:items-end md:justify-between gap-3 mb-5">
                             <div class="flex items-end gap-3">
-                                <img id="profileAvatar" src="" alt="Avatar" class="w-24 h-24 md:w-32 md:h-32 object-cover border-4 border-black bg-white">
+                                <img id="profileAvatar" src="https://placehold.co/128x128/f3e8b0/3d2817?text=NO+FOTO" alt="Avatar" class="w-24 h-24 md:w-32 md:h-32 object-cover border-4 border-black bg-white">
                                 <div class="pb-1">
                                     <p id="profileHeroName" class="text-2xl md:text-3xl font-bold" style="color: #3d2817; font-family: 'VT323', monospace;">Usuario</p>
                                     <p id="profileHeroHandle" class="text-sm md:text-base" style="color: #5f0f40; font-family: 'Press Start 2P', cursive;">@usuario</p>
@@ -301,6 +301,9 @@
                                 </button>
                                 <button id="profileFollowBtn" type="button" onclick="toggleFollowProfile()" class="retro-btn bg-fuchsia-300 hover:bg-fuchsia-200 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
                                     SEGUIR
+                                </button>
+                                <button id="profileTwoFactorBtn" type="button" onclick="toggleTwoFactorProfile()" class="retro-btn bg-indigo-300 hover:bg-indigo-200 text-black px-4 py-2 text-xs hidden" style="font-size: 10px;">
+                                    ACTIVAR 2FA
                                 </button>
                             </div>
                         </div>
@@ -339,6 +342,10 @@
                                     <div>
                                         <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">EMAIL:</label>
                                         <input type="text" id="profileEmail" class="retro-input w-full p-2" disabled>
+                                    </div>
+                                    <div>
+                                        <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">SEGURIDAD:</label>
+                                        <p id="profileTwoFactorStatus" class="retro-input w-full p-2 text-lg">2FA desactivado</p>
                                     </div>
                                     <div>
                                         <label class="block font-bold mb-1 text-lg" style="color: #3d2817;">FOTO:</label>
@@ -436,6 +443,6 @@
         </div>
     </div>
 
-    <script src="script.js"></script>
+    <script src="/script.js"></script>
 </body>
 </html>

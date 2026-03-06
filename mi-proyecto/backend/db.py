@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash TEXT NOT NULL,
     auth_provider TEXT NOT NULL DEFAULT 'local',
     google_sub TEXT,
+    two_factor_secret TEXT,
+    two_factor_enabled INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL,
     last_login_at TEXT,
     UNIQUE(google_sub)
@@ -114,6 +116,10 @@ def init_db() -> None:
         db.execute("ALTER TABLE users ADD COLUMN avatar_url TEXT NOT NULL DEFAULT ''")
     if "cover_url" not in existing_columns:
         db.execute("ALTER TABLE users ADD COLUMN cover_url TEXT NOT NULL DEFAULT ''")
+    if "two_factor_secret" not in existing_columns:
+        db.execute("ALTER TABLE users ADD COLUMN two_factor_secret TEXT")
+    if "two_factor_enabled" not in existing_columns:
+        db.execute("ALTER TABLE users ADD COLUMN two_factor_enabled INTEGER NOT NULL DEFAULT 0")
 
     db.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_sub ON users (google_sub) WHERE google_sub IS NOT NULL"

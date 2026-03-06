@@ -15,6 +15,10 @@ let replyingToMessageId = null;
 let isProfileSectionVisible = false;
 let isProfileEditing = false;
 let currentProfileUsername = null;
+let activeProfileData = null;
+let activeProfileMessages = [];
+let csrfToken = null;
+let twoFactorIntent = null;
 
 const ALLOWED_CATEGORIES = ['general', 'anuncios', 'preguntas', 'ideas', 'offtopic'];
 const API_BASE = 'http://localhost:3000';
@@ -75,6 +79,7 @@ function mapApiUser(user) {
         lastName: sanitizeString(user.lastName || '', 50),
         avatarDataUrl: sanitizeImageUrl(user.avatarUrl || ''),
         coverDataUrl: sanitizeImageUrl(user.coverUrl || ''),
+        twoFactorEnabled: Boolean(user.twoFactorEnabled),
         friendIds: [],
         followingIds: [],
         registeredAt: user.createdAt || new Date().toISOString(),
@@ -99,14 +104,76 @@ function mapApiMessage(message) {
     };
 }
 
+function mapApiProfile(profile) {
+    if (!profile || typeof profile !== 'object') return null;
+
+    return ensureSocialFields({
+        id: profile.id,
+        username: sanitizeString(profile.username || '', 20),
+        email: sanitizeString(profile.email || '', 254),
+        firstName: sanitizeString(profile.firstName || '', 50),
+        lastName: sanitizeString(profile.lastName || '', 50),
+        avatarDataUrl: sanitizeImageUrl(profile.avatarUrl || ''),
+        coverDataUrl: sanitizeImageUrl(profile.coverUrl || ''),
+        friendIds: [],
+        followingIds: [],
+        registeredAt: profile.createdAt || new Date().toISOString(),
+        loginAt: profile.lastLoginAt || new Date().toISOString(),
+        contributions: Number.isInteger(profile.contributions) ? profile.contributions : 0,
+        level: profile.level || null,
+        social: {
+            friends: profile.social && Number.isInteger(profile.social.friends) ? profile.social.friends : 0,
+            followers: profile.social && Number.isInteger(profile.social.followers) ? profile.social.followers : 0,
+            following: profile.social && Number.isInteger(profile.social.following) ? profile.social.following : 0,
+            viewerIsFriend: Boolean(profile.social && profile.social.viewerIsFriend),
+            viewerFollows: Boolean(profile.social && profile.social.viewerFollows),
+        },
+    });
+}
+
+async function loadActiveProfileContext() {
+    if (!currentUser || !isProfileSectionVisible) {
+        activeProfileData = null;
+        activeProfileMessages = [];
+        return;
+    }
+
+    const targetUsername = currentProfileUsername || currentUser.username;
+    if (!targetUsername) {
+        activeProfileData = null;
+        activeProfileMessages = [];
+        return;
+    }
+
+    try {
+        const data = await apiRequest(`/api/profile/${encodeURIComponent(targetUsername)}?limit=100&offset=0`, {
+            method: 'GET',
+            headers: {},
+        });
+
+        activeProfileData = mapApiProfile(data.profile);
+        activeProfileMessages = Array.isArray(data.messages) ? data.messages.map(mapApiMessage) : [];
+    } catch (_error) {
+        activeProfileData = null;
+        activeProfileMessages = [];
+    }
+}
+
 async function apiRequest(path, options = {}) {
+    const method = String(options.method || 'GET').toUpperCase();
+    const isUnsafeMethod = method === 'POST' || method === 'PUT' || method === 'PATCH' || method === 'DELETE';
+    const extraHeaders = {
+        'Content-Type': 'application/json',
+        ...(options.headers || {}),
+    };
+    if (isUnsafeMethod && csrfToken) {
+        extraHeaders['X-CSRF-Token'] = csrfToken;
+    }
+
     const response = await fetch(`${API_BASE}${path}`, {
         credentials: 'include',
         ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            ...(options.headers || {}),
-        },
+        headers: extraHeaders,
     });
 
     let data = null;
@@ -128,8 +195,10 @@ async function hydrateSessionFromBackend() {
     try {
         const data = await apiRequest('/api/auth/me', { method: 'GET' });
         currentUser = mapApiUser(data.user);
+        csrfToken = typeof data.csrfToken === 'string' ? data.csrfToken : null;
     } catch (_error) {
         currentUser = null;
+        csrfToken = null;
     }
 }
 
@@ -276,7 +345,7 @@ function getCurrentRoute() {
     return '/';
 }
 
-function renderRoute() {
+async function renderRoute() {
     const route = getCurrentRoute();
     const publishSection = document.getElementById('publishSection');
     const wallSection = document.getElementById('wallSection');
@@ -310,6 +379,7 @@ function renderRoute() {
         }
     }
 
+    await loadActiveProfileContext();
     renderProfileSection();
 }
 
@@ -396,8 +466,18 @@ function closeTwoFactorModal() {
         codeInput.value = '';
     }
 
+    const setupPanel = document.getElementById('twoFactorSetupPanel');
+    const secretText = document.getElementById('twoFactorSecretText');
+    const submitBtn = document.getElementById('twoFactorSubmitBtn');
+    const secondaryBtn = document.getElementById('twoFactorSecondaryBtn');
+    if (setupPanel) setupPanel.classList.add('hidden');
+    if (secretText) secretText.textContent = '-';
+    if (submitBtn) submitBtn.textContent = 'VERIFICAR';
+    if (secondaryBtn) secondaryBtn.textContent = 'CANCELAR';
+
     pendingAuthUser = null;
     twoFactorState = null;
+    twoFactorIntent = null;
 }
 
 function finalizeUserLogin(user) {
@@ -428,8 +508,10 @@ function startTwoFactorChallenge(user, provider = 'local') {
         code: generateTwoFactorCode(),
         expiresAt: Date.now() + TWO_FACTOR_EXPIRY_MS,
         attempts: 0,
-        provider
+        provider,
+        serverVerify: provider === 'local'
     };
+    twoFactorIntent = twoFactorState.serverVerify ? 'login' : 'demo';
 
     const info = document.getElementById('twoFactorInfo');
     if (info) {
@@ -437,8 +519,10 @@ function startTwoFactorChallenge(user, provider = 'local') {
         info.textContent = `Factor 1 validado (${providerLabel}). Introduce el codigo temporal.`;
     }
 
-    // Demo sin backend: mostramos codigo por toast.
-    showNotification(`Codigo 2FA (demo): ${twoFactorState.code}`, 'warning');
+    if (!twoFactorState.serverVerify) {
+        // Flujo demo legacy para proveedores no locales.
+        showNotification(`Codigo 2FA (demo): ${twoFactorState.code}`, 'warning');
+    }
     openTwoFactorModal();
 }
 
@@ -449,10 +533,150 @@ function resendTwoFactorCode() {
     }
 
     const provider = twoFactorState ? twoFactorState.provider : 'local';
+    if (twoFactorState && twoFactorState.serverVerify) {
+        showNotification('Usa el codigo de tu app autenticadora.', 'info');
+        return;
+    }
     startTwoFactorChallenge(pendingAuthUser, provider);
 }
 
-function verifyTwoFactorCode(event) {
+function handleTwoFactorSecondaryAction() {
+    if (twoFactorIntent === 'setup') {
+        showNotification('Escanea el QR y escribe el codigo de 6 digitos.', 'info');
+        return;
+    }
+    closeTwoFactorModal();
+}
+
+function renderTwoFactorQr(otpauthUrl, qrDataUrl = '') {
+    const qrCanvas = document.getElementById('twoFactorQrCanvas');
+    const info = document.getElementById('twoFactorInfo');
+
+    if (!qrCanvas) {
+        showNotification('No se encontro el canvas QR.', 'error');
+        return;
+    }
+
+    if (qrDataUrl && qrDataUrl.startsWith('data:image/png;base64,')) {
+        const ctx = qrCanvas.getContext('2d');
+        const image = new Image();
+        image.onload = () => {
+            qrCanvas.width = image.width;
+            qrCanvas.height = image.height;
+            ctx.clearRect(0, 0, qrCanvas.width, qrCanvas.height);
+            ctx.drawImage(image, 0, 0);
+            if (info) {
+                info.textContent = 'Escanea el QR en tu app autenticadora y confirma con el codigo de 6 digitos.';
+            }
+        };
+        image.onerror = () => {
+            if (info) {
+                info.textContent = 'Error al dibujar QR. Usa la clave manual de abajo.';
+            }
+        };
+        image.src = qrDataUrl;
+        return;
+    }
+
+    if (!otpauthUrl) {
+        if (info) {
+            info.textContent = 'No se pudo generar URL de configuracion. Usa la clave manual.';
+        }
+        return;
+    }
+
+    if (!window.QRCode || typeof window.QRCode.toCanvas !== 'function') {
+        if (info) {
+            info.textContent = 'No se pudo renderizar el QR en este navegador. Usa la clave manual de abajo.';
+        }
+        return;
+    }
+
+    window.QRCode.toCanvas(qrCanvas, otpauthUrl, { width: 200 }, (error) => {
+        if (error) {
+            console.error('Error renderizando QR 2FA:', error);
+            if (info) {
+                info.textContent = 'Error al renderizar QR. Usa la clave manual de abajo.';
+            }
+            return;
+        }
+
+        if (info) {
+            info.textContent = 'Escanea el QR en tu app autenticadora y confirma con el codigo de 6 digitos.';
+        }
+    });
+}
+
+async function toggleTwoFactorProfile() {
+    if (!currentUser) return;
+    if (!isViewingOwnProfile(currentUser.username)) {
+        showNotification('Solo puedes gestionar tu propio 2FA.', 'error');
+        return;
+    }
+
+    if (currentUser.twoFactorEnabled) {
+        twoFactorIntent = 'disable';
+        pendingAuthUser = { username: currentUser.username };
+        twoFactorState = {
+            code: '',
+            expiresAt: Date.now() + TWO_FACTOR_EXPIRY_MS,
+            attempts: 0,
+            provider: 'local',
+            serverVerify: false,
+        };
+        const setupPanel = document.getElementById('twoFactorSetupPanel');
+        const info = document.getElementById('twoFactorInfo');
+        const submitBtn = document.getElementById('twoFactorSubmitBtn');
+        const secondaryBtn = document.getElementById('twoFactorSecondaryBtn');
+        if (setupPanel) setupPanel.classList.add('hidden');
+        if (info) info.textContent = 'Introduce tu codigo actual para desactivar 2FA.';
+        if (submitBtn) submitBtn.textContent = 'DESACTIVAR';
+        if (secondaryBtn) secondaryBtn.textContent = 'CANCELAR';
+        openTwoFactorModal();
+        return;
+    }
+
+    try {
+        const data = await apiRequest('/api/auth/2fa/setup', {
+            method: 'POST',
+            body: JSON.stringify({}),
+        });
+        const twoFactor = data.twoFactor || {};
+        const otpauthUrl = twoFactor.otpauthUrl || '';
+        const qrDataUrl = twoFactor.qrDataUrl || '';
+        const secret = twoFactor.secret || '';
+
+        twoFactorIntent = 'setup';
+        pendingAuthUser = { username: currentUser.username };
+        twoFactorState = {
+            code: '',
+            expiresAt: Date.now() + TWO_FACTOR_EXPIRY_MS,
+            attempts: 0,
+            provider: 'local',
+            serverVerify: false,
+        };
+        const setupPanel = document.getElementById('twoFactorSetupPanel');
+        const info = document.getElementById('twoFactorInfo');
+        const submitBtn = document.getElementById('twoFactorSubmitBtn');
+        const secondaryBtn = document.getElementById('twoFactorSecondaryBtn');
+        const secretText = document.getElementById('twoFactorSecretText');
+        const qrCanvas = document.getElementById('twoFactorQrCanvas');
+
+        if (setupPanel) setupPanel.classList.remove('hidden');
+        if (info) info.textContent = 'Escanea el QR en tu app autenticadora y confirma con el codigo de 6 digitos.';
+        if (submitBtn) submitBtn.textContent = 'ACTIVAR 2FA';
+        if (secondaryBtn) secondaryBtn.textContent = 'AYUDA';
+        if (secretText) secretText.textContent = secret || '-';
+
+        renderTwoFactorQr(otpauthUrl, qrDataUrl);
+
+        openTwoFactorModal();
+    } catch (error) {
+        showNotification(error.message || 'No se pudo iniciar configuracion 2FA.', 'error');
+    }
+}
+
+async function verifyTwoFactorCode(event) {
     event.preventDefault();
 
     if (!pendingAuthUser || !twoFactorState) {
@@ -477,6 +701,61 @@ function verifyTwoFactorCode(event) {
         showNotification('Demasiados intentos. Inicia sesion otra vez.', 'error');
         closeTwoFactorModal();
         return;
+    }
+
+    if (twoFactorIntent === 'setup') {
+        try {
+            await apiRequest('/api/auth/2fa/enable', {
+                method: 'POST',
+                body: JSON.stringify({ code: enteredCode }),
+            });
+            currentUser.twoFactorEnabled = true;
+            closeTwoFactorModal();
+            renderProfileSection();
+            showNotification('2FA activado correctamente.', 'success');
+            return;
+        } catch (error) {
+            showNotification(error.message || 'Codigo 2FA invalido.', 'error');
+            return;
+        }
+    }
+
+    if (twoFactorIntent === 'disable') {
+        try {
+            await apiRequest('/api/auth/2fa/disable', {
+                method: 'POST',
+                body: JSON.stringify({ code: enteredCode }),
+            });
+            currentUser.twoFactorEnabled = false;
+            closeTwoFactorModal();
+            renderProfileSection();
+            showNotification('2FA desactivado.', 'info');
+            return;
+        } catch (error) {
+            showNotification(error.message || 'Codigo 2FA invalido.', 'error');
+            return;
+        }
+    }
+
+    if (twoFactorState.serverVerify) {
+        try {
+            const data = await apiRequest('/api/auth/2fa/verify-login', {
+                method: 'POST',
+                body: JSON.stringify({ code: enteredCode }),
+            });
+            currentUser = mapApiUser(data.user);
+            csrfToken = typeof data.csrfToken === 'string' ? data.csrfToken : null;
+            closeAuthModal();
+            closeTwoFactorModal();
+            updateUI();
+            await loadMessagesFromBackend();
+            renderMessages();
+            showNotification('2FA correcto. Sesion iniciada.', 'success');
+            return;
+        } catch (error) {
+            showNotification(error.message || 'Codigo 2FA incorrecto.', 'error');
+            return;
+        }
     }
 
     if (enteredCode !== twoFactorState.code) {
@@ -512,11 +791,10 @@ function initializeGoogleLogin() {
             }
 
             try {
-                const profile = await fetchGoogleUserProfile(tokenResponse.access_token);
-                handleGoogleProfile(profile);
+                await authenticateWithGoogleToken(tokenResponse.access_token);
             } catch (error) {
-                console.error('Error obteniendo perfil de Google:', error);
-                showAuthError('No se pudo obtener el perfil de Google.');
+                console.error('Error en autenticacion Google:', error);
+                showAuthError(error.message || 'No se pudo iniciar sesion con Google.');
             }
         }
     });
@@ -549,6 +827,22 @@ async function fetchGoogleUserProfile(accessToken) {
     }
 
     return response.json();
+}
+
+async function authenticateWithGoogleToken(credential) {
+    const intent = getGoogleAuthIntent();
+    const data = await apiRequest('/api/auth/google', {
+        method: 'POST',
+        body: JSON.stringify({ credential, intent }),
+    });
+
+    currentUser = mapApiUser(data.user);
+    csrfToken = typeof data.csrfToken === 'string' ? data.csrfToken : null;
+    closeAuthModal();
+    updateUI();
+    await loadMessagesFromBackend();
+    renderMessages();
+    showNotification('Sesion iniciada con Google', 'success');
 }
 
 function getGoogleAuthIntent() {
@@ -610,13 +904,10 @@ function handleGoogleCredentialResponse(response) {
         return;
     }
 
-    const payload = decodeJwtPayload(response.credential);
-    if (!payload || !payload.email) {
-        showAuthError('Token de Google inválido.');
-        return;
-    }
-
-    handleGoogleProfile(payload);
+    authenticateWithGoogleToken(response.credential).catch((error) => {
+        console.error('Error en autenticacion Google:', error);
+        showAuthError(error.message || 'No se pudo iniciar sesion con Google.');
+    });
 }
 
 function handleGoogleProfile(profile) {
@@ -729,7 +1020,27 @@ async function handleLogin(event) {
             method: 'POST',
             body: JSON.stringify({ username, password }),
         });
+
+        if (data && data.twoFactorRequired) {
+            pendingAuthUser = { username };
+            twoFactorState = {
+                code: '',
+                expiresAt: Date.now() + TWO_FACTOR_EXPIRY_MS,
+                attempts: 0,
+                provider: 'local',
+                serverVerify: true,
+            };
+            twoFactorIntent = 'login';
+            const info = document.getElementById('twoFactorInfo');
+            if (info) {
+                info.textContent = 'Introduce el codigo de tu app autenticadora para completar el login.';
+            }
+            openTwoFactorModal();
+            return;
+        }
+
         currentUser = mapApiUser(data.user);
+        csrfToken = typeof data.csrfToken === 'string' ? data.csrfToken : null;
         closeAuthModal();
         updateUI();
         await loadMessagesFromBackend();
@@ -837,6 +1148,7 @@ async function handleRegister(event) {
             body: JSON.stringify({ email, username, firstName, lastName, password }),
         });
         currentUser = mapApiUser(data.user);
+        csrfToken = typeof data.csrfToken === 'string' ? data.csrfToken : null;
         closeAuthModal();
         updateUI();
         await loadMessagesFromBackend();
@@ -857,6 +1169,7 @@ async function logout() {
     } catch (_error) {
         // If backend session is already gone, continue with local cleanup.
     }
+    csrfToken = null;
     currentUser = null;
     isProfileSectionVisible = false;
     localStorage.removeItem('foroUser');
@@ -1539,6 +1852,8 @@ function renderProfileSection() {
     const editBtn = document.getElementById('profileEditBtn');
     const friendBtn = document.getElementById('profileFriendBtn');
     const followBtn = document.getElementById('profileFollowBtn');
+    const twoFactorBtn = document.getElementById('profileTwoFactorBtn');
+    const twoFactorStatusEl = document.getElementById('profileTwoFactorStatus');
     const friendsCountEl = document.getElementById('profileFriendsCount');
     const followersCountEl = document.getElementById('profileFollowersCount');
     const followingCountEl = document.getElementById('profileFollowingCount');
@@ -1555,7 +1870,7 @@ function renderProfileSection() {
 
     section.classList.remove('hidden');
 
-    const profileUser = getProfileUserContext();
+    const profileUser = activeProfileData || getProfileUserContext();
     if (!profileUser) {
         if (firstNameEl) firstNameEl.value = '';
         if (lastNameEl) lastNameEl.value = '';
@@ -1614,9 +1929,19 @@ function renderProfileSection() {
     }
 
     const isOwnProfile = isViewingOwnProfile(profileUser.username);
-    const level = getUserLevelById(profileUser.id);
-    const profileMessages = getMessagesForUser(profileUser);
-    const social = getUserSocialMetrics(profileUser);
+    const level = profileUser.level || getUserLevelById(profileUser.id);
+    const profileMessages = activeProfileMessages.length > 0 ? activeProfileMessages : getMessagesForUser(profileUser);
+    const socialFromApi = profileUser.social;
+    const socialFromLocal = getUserSocialMetrics(profileUser);
+    const social = socialFromApi
+        ? {
+            friendsCount: socialFromApi.friends,
+            followersCount: socialFromApi.followers,
+            followingCount: socialFromApi.following,
+            isFriendWithViewer: socialFromApi.viewerIsFriend,
+            viewerFollowsProfile: socialFromApi.viewerFollows,
+        }
+        : socialFromLocal;
     if (levelEl) {
         levelEl.textContent = `Perfil: @${profileUser.username} | Nivel: ${level.name} | Publicaciones: ${profileMessages.length}`;
     }
@@ -1643,6 +1968,18 @@ function renderProfileSection() {
         } else {
             followBtn.classList.remove('hidden');
             followBtn.textContent = social.viewerFollowsProfile ? 'DEJAR DE SEGUIR' : 'SEGUIR';
+        }
+    }
+
+    if (twoFactorStatusEl) {
+        twoFactorStatusEl.textContent = currentUser && currentUser.twoFactorEnabled ? '2FA activado' : '2FA desactivado';
+    }
+    if (twoFactorBtn) {
+        if (isOwnProfile && currentUser) {
+            twoFactorBtn.classList.remove('hidden');
+            twoFactorBtn.textContent = currentUser.twoFactorEnabled ? 'DESACTIVAR 2FA' : 'ACTIVAR 2FA';
+        } else {
+            twoFactorBtn.classList.add('hidden');
         }
     }
 
@@ -1813,67 +2150,46 @@ function handleProfileCoverUpload(event) {
     reader.readAsDataURL(file);
 }
 
-function toggleFriendshipProfile() {
+async function toggleFriendshipProfile() {
     if (!currentUser || !currentProfileUsername) return;
-    const target = getRegisteredUserByUsername(currentProfileUsername);
-    const viewer = getRegisteredUserById(currentUser.id);
-    if (!target || !viewer) {
-        showNotification('No se pudo actualizar la amistad.', 'error');
-        return;
-    }
-    if (target.id === viewer.id) {
-        showNotification('No puedes agregarte como amigo.', 'warning');
-        return;
-    }
 
-    viewer.friendIds = normalizeIdList(viewer.friendIds);
-    target.friendIds = normalizeIdList(target.friendIds);
+    const isFriend = Boolean(activeProfileData && activeProfileData.social && activeProfileData.social.viewerIsFriend);
+    const method = isFriend ? 'DELETE' : 'POST';
 
-    const alreadyFriend = viewer.friendIds.includes(target.id) && target.friendIds.includes(viewer.id);
-    if (alreadyFriend) {
-        viewer.friendIds = viewer.friendIds.filter(id => id !== target.id);
-        target.friendIds = target.friendIds.filter(id => id !== viewer.id);
-        showNotification('Amistad eliminada.', 'info');
-    } else {
-        viewer.friendIds.push(target.id);
-        target.friendIds.push(viewer.id);
-        viewer.friendIds = normalizeIdList(viewer.friendIds);
-        target.friendIds = normalizeIdList(target.friendIds);
-        showNotification(`Ahora eres amigo de @${target.username}.`, 'success');
+    try {
+        await apiRequest(`/api/profile/${encodeURIComponent(currentProfileUsername)}/friend`, { method });
+        await loadActiveProfileContext();
+        renderProfileSection();
+        showNotification(
+            isFriend
+                ? `Ya no eres amigo de @${currentProfileUsername}.`
+                : `Ahora eres amigo de @${currentProfileUsername}.`,
+            isFriend ? 'info' : 'success'
+        );
+    } catch (error) {
+        showNotification(error.message || 'No se pudo actualizar la amistad.', 'error');
     }
-
-    currentUser = ensureSocialFields({ ...viewer, loginAt: currentUser.loginAt, registeredAt: currentUser.registeredAt });
-    saveToLocalStorage();
-    renderProfileSection();
 }
 
-function toggleFollowProfile() {
+async function toggleFollowProfile() {
     if (!currentUser || !currentProfileUsername) return;
-    const target = getRegisteredUserByUsername(currentProfileUsername);
-    const viewer = getRegisteredUserById(currentUser.id);
-    if (!target || !viewer) {
-        showNotification('No se pudo actualizar seguimiento.', 'error');
-        return;
-    }
-    if (target.id === viewer.id) {
-        showNotification('No puedes seguirte a ti mismo.', 'warning');
-        return;
-    }
 
-    viewer.followingIds = normalizeIdList(viewer.followingIds);
-    const isFollowing = viewer.followingIds.includes(target.id);
-    if (isFollowing) {
-        viewer.followingIds = viewer.followingIds.filter(id => id !== target.id);
-        showNotification(`Ya no sigues a @${target.username}.`, 'info');
-    } else {
-        viewer.followingIds.push(target.id);
-        viewer.followingIds = normalizeIdList(viewer.followingIds);
-        showNotification(`Ahora sigues a @${target.username}.`, 'success');
-    }
+    const isFollowing = Boolean(activeProfileData && activeProfileData.social && activeProfileData.social.viewerFollows);
+    const method = isFollowing ? 'DELETE' : 'POST';
 
-    currentUser = ensureSocialFields({ ...viewer, loginAt: currentUser.loginAt, registeredAt: currentUser.registeredAt });
-    saveToLocalStorage();
-    renderProfileSection();
+    try {
+        await apiRequest(`/api/profile/${encodeURIComponent(currentProfileUsername)}/follow`, { method });
+        await loadActiveProfileContext();
+        renderProfileSection();
+        showNotification(
+            isFollowing
+                ? `Ya no sigues a @${currentProfileUsername}.`
+                : `Ahora sigues a @${currentProfileUsername}.`,
+            isFollowing ? 'info' : 'success'
+        );
+    } catch (error) {
+        showNotification(error.message || 'No se pudo actualizar seguimiento.', 'error');
+    }
 }
 
 function syncCurrentUserToRegistry() {
